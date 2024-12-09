@@ -88,7 +88,7 @@ class ParallelBarcodeGenerator:
         for i in range(1, len(barcode)):
             if barcode[i] == barcode[i - 1]:
                 count += 1
-                if count >= max_homopolymer_length:
+                if count > max_homopolymer_length:
                     return True
             else:
                 count = 1
@@ -120,6 +120,10 @@ class ParallelBarcodeGenerator:
                 return False, -1
             elif edlib.align(new_str_rc, seq, task='distance')['editDistance'] < min_distance:
                 return False, -1
+
+        # Check against self (reverse complement)
+        if edlib.align(new_str, new_str_rc, task='distance')['editDistance'] < min_distance:
+            return False, -1
 
         return True, -1
 
@@ -315,7 +319,7 @@ def parse_arguments() -> argparse.Namespace:
     parser.add_argument(
         '--max-homopolymer',
         type=int,
-        default=4,
+        default=2,
         help='Maximum allowed homopolymer length'
     )
     parser.add_argument(
