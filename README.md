@@ -1,4 +1,4 @@
-# Parallel Barcode Generator
+# Exhaustive Barcode Generator
 
 A Python program that systematically generates DNA barcodes for dual-indexed sequencing, optimized for nanopore applications.
 
@@ -15,7 +15,7 @@ A Python program that systematically generates DNA barcodes for dual-indexed seq
 ## Usage
 
 ```bash
-parallel_barcode_generator.py [options]
+barcode_generator.py [options]
 ```
 
 ### Options
