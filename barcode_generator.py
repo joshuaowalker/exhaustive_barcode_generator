@@ -104,16 +104,21 @@ class ParallelBarcodeGenerator:
         Returns (is_compatible, index_of_conflict) where index_of_conflict is -1 if compatible
         """
         new_str = ''.join(new_barcode)
+        new_str_rc = reverse_complement(new_str)
 
         # Check against accepted barcodes
         for i, existing in enumerate(accepted_barcodes):
             existing_str = ''.join(existing)
             if edlib.align(new_str, existing_str, task='distance')['editDistance'] < min_distance:
                 return False, i
+            elif edlib.align(new_str_rc, existing_str, task='distance')['editDistance'] < min_distance:
+                return False, i
 
         # Check against exclusion sequences
         for seq in exclusion_seqs:
             if edlib.align(new_str, seq, task='distance')['editDistance'] < min_distance:
+                return False, -1
+            elif edlib.align(new_str_rc, seq, task='distance')['editDistance'] < min_distance:
                 return False, -1
 
         return True, -1
@@ -200,7 +205,6 @@ class ParallelBarcodeGenerator:
                 # Add sequences and their reverse complements
                 for seq in processed_seqs:
                     exclusion_seqs.append(seq)
-                    exclusion_seqs.append(reverse_complement(seq))
 
         logging.info(f"Loaded {len(exclusion_seqs)} exclusion sequences")
         return exclusion_seqs
