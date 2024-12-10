@@ -157,6 +157,29 @@ class ParallelBarcodeGenerator:
 
         return candidate_barcodes
 
+    @staticmethod
+    def homopolymer_percentage(barcode: List[str]) -> float:
+        """Calculate the percentage of bases that are part of homopolymer runs"""
+        if not barcode:
+            return 0.0
+
+        homopolymer_positions = 0
+        current_run = 1
+
+        # Count positions in homopolymer runs
+        for i in range(1, len(barcode)):
+            if barcode[i] == barcode[i - 1]:
+                current_run += 1
+                # Count both positions in a run of 2, and all positions in longer runs
+                if current_run == 2:
+                    homopolymer_positions += 2
+                elif current_run > 2:
+                    homopolymer_positions += 1
+            else:
+                current_run = 1
+
+        return homopolymer_positions / len(barcode)
+
     def _generate_random_sequences(self, n: int = 1) -> List[str]:
         """Generate n random sequences of barcode length"""
         import random
@@ -340,6 +363,12 @@ def parse_arguments() -> argparse.Namespace:
         help='Output file path (default: barcode_<date>.txt)'
     )
     parser.add_argument(
+        '--sort',
+        choices=['homopolymer', 'gc_content', 'lexicographic'],
+        default='homopolymer',
+        help='Sort output by criterion (homopolymer: ascending order of homopolymer percentage)'
+    )
+    parser.add_argument(
         '--random-seqs',
         type=int,
         default=1,
@@ -382,16 +411,33 @@ def parse_arguments() -> argparse.Namespace:
 
     return args
 
-
 def write_output(
         barcodes: List[List[str]],
         output_path: Path,
         length: int,
         min_distance: int,
         runtime: float,
-        sequences_checked: int
+        sequences_checked: int,
+        sort_by: Optional[str] = None
 ) -> None:
     """Write barcodes and statistics to output file"""
+
+    # Prepare barcode data with metrics
+    barcode_data = []
+    for barcode in barcodes:
+        barcode_str = ''.join(barcode)
+        gc = ParallelBarcodeGenerator.gc_cont(barcode)
+        homo_pct = ParallelBarcodeGenerator.homopolymer_percentage(barcode)
+        barcode_data.append((barcode_str, gc, homo_pct))
+
+    # Sort if requested
+    if sort_by == 'gc_content':
+        barcode_data.sort(key=lambda x: x[1])
+    elif sort_by == 'lexicographic':
+        barcode_data.sort(key=lambda x: x[0])
+    elif sort_by == 'homopolymer':
+        barcode_data.sort(key=lambda x: x[2])
+
     with open(output_path, 'w') as f:
         f.write(f'Parallel Barcode Generator Results\n')
         f.write(f'Generated on: {date.today().isoformat()}\n\n')
@@ -402,13 +448,13 @@ def write_output(
         f.write(f'- Runtime: {runtime:.2f} seconds\n\n')
         f.write(f'Found {len(barcodes)} barcodes:\n\n')
 
-        # Write barcodes with GC content
-        for barcode in barcodes:
-            barcode_str = ''.join(barcode)
-            gc = ParallelBarcodeGenerator.gc_cont(barcode)
-            f.write(f'{barcode_str}\t{gc:.2%} GC\n')
+        # Write header
+        f.write('Sequence\tGC Content\tHomopolymer %\n')
 
-    logging.info(f"Results written to {output_path}")
+        # Write barcodes with metrics
+        for barcode_str, gc, homo_pct in barcode_data:
+            f.write(f'{barcode_str}\t{gc:.2%}\t{homo_pct:.2%}\n')
+
 
 
 def main() -> None:
@@ -441,27 +487,42 @@ def main() -> None:
     end_time = time.process_time()
     runtime = end_time - start_time
 
-    # Write output
+    # Write output with sorting
     write_output(
         barcodes,
         args.output,
         args.length,
         args.min_distance,
         runtime,
-        sequences_checked
+        sequences_checked,
+        args.sort
     )
+
+    # Prepare barcode data with metrics
+    barcode_data = []
+    for barcode in barcodes:
+        barcode_str = ''.join(barcode)
+        gc = ParallelBarcodeGenerator.gc_cont(barcode)
+        homo_pct = ParallelBarcodeGenerator.homopolymer_percentage(barcode)
+        barcode_data.append((barcode_str, gc, homo_pct))
+
+    # Sort if requested
+    if args.sort == 'homopolymer':
+        barcode_data.sort(key=lambda x: x[2])  # Sort by homopolymer percentage
 
     # Print summary to console
     print("\nRESULTS\n")
     print(f"Sequences checked: {sequences_checked:,}")
     print(f"Valid barcodes found: {len(barcodes)}")
     print(f"Runtime: {runtime:.2f} seconds")
-    print("\nGenerated barcodes and GC content:")
-    for barcode in barcodes:
-        print(f"{''.join(barcode)}\t{ParallelBarcodeGenerator.gc_cont(barcode):.2%} GC")
+    print("\nGenerated barcodes with metrics:")
+    print("Sequence\tGC Content\tHomopolymer %")
+    for barcode_str, gc, homo_pct in barcode_data:
+        print(f"{barcode_str}\t{gc:.2%}\t{homo_pct:.2%}")
 
     logging.info('Complete')
 
-
 if __name__ == '__main__':
     main()
+
+
