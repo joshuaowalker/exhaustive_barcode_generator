@@ -42,14 +42,12 @@ class ReadSimulator:
                  homopolymer_error_rate: float = 0.2,
                  truncation_max: int = 20,
                  truncation_prob: float = 0.3,
-                 adapter_prob: float = 0.8,
                  adapter_seq: str = None):
         self.noise_length = noise_length
         self.error_rate = error_rate
         self.homopolymer_error_rate = homopolymer_error_rate
         self.truncation_max = truncation_max
         self.truncation_prob = truncation_prob
-        self.adapter_prob = adapter_prob
         self.adapter_seq = adapter_seq
 
         # Precompute some common values
@@ -65,17 +63,7 @@ class ReadSimulator:
         }
 
     def weighted_truncation_length(self) -> int:
-        """
-        Generate a truncation length using an exponential decay function.
-        Returns values 0-20 with higher probability for smaller values.
-        """
-        # Use exponential decay with rate -0.2 to get rough distribution:
-        # ~50% for 0-4, ~30% for 5-10, ~20% for 11-20
-        while True:
-            x = random.expovariate(0.2)
-            length = int(x)
-            if length <= self.truncation_max:
-                return length
+        return random.randint(0, 60)
 
     def truncate_sequence(self, sequence: str) -> str:
         """Apply truncation to one end of the sequence"""
@@ -86,8 +74,8 @@ class ReadSimulator:
         if trunc_len == 0:
             return sequence
 
-        # Randomly choose which end to truncate
-        if random.random() < 0.5:
+        # Randomly choose which end to truncate - bias towards final end
+        if random.random() < 0.05:
             # Truncate start
             return sequence[trunc_len:]
         else:
@@ -153,7 +141,7 @@ class ReadSimulator:
 
         return ''.join(bases)
 
-    def construct_read(self, specimen: SpecimenInfo) -> Tuple[str, str]:
+    def construct_read(self, specimen: SpecimenInfo) -> str:
         """
         Construct a complete read for a specimen
         Returns (sequence, golden_string)
@@ -168,41 +156,31 @@ class ReadSimulator:
 
         # Build parts of sequence separately for better memory efficiency
         parts = [
+            self.adapter_seq,
             specimen.fwd_barcode,
             specimen.fwd_primer,
             self.generate_noise(self.noise_length),
             golden,
             self.generate_noise(self.noise_length),
             reverse_complement(specimen.rev_primer),
-            reverse_complement(specimen.rev_barcode)
+            reverse_complement(specimen.rev_barcode),
+            reverse_complement(self.adapter_seq),
         ]
 
         # Join parts into full sequence
         sequence = ''.join(parts)
 
-        # Record golden string boundaries for error protection
-        golden_start = sequence.find(START_DELIMITER)
-        golden_end = sequence.find(END_DELIMITER) + len(END_DELIMITER)
+        # Add adapter and handle orientation
+        is_reverse = random.choice([True, False])
+        if is_reverse:
+            sequence = reverse_complement(sequence)
+
+        sequence = self.introduce_errors(sequence, ERROR_RANGE, len(sequence) - ERROR_RANGE)
 
         # Apply truncation
         sequence = self.truncate_sequence(sequence)
 
-        # Add adapter and handle orientation
-        if random.random() <= self.adapter_prob:
-            is_reverse = random.choice([True, False])
-            adapter = self.adapter_seq
-
-            if is_reverse:
-                adapter = reverse_complement(adapter)
-                sequence = sequence + adapter
-                sequence = reverse_complement(sequence)
-                golden = reverse_complement(golden)
-            else:
-                sequence = adapter + sequence
-
-        sequence = self.introduce_errors(sequence, ERROR_RANGE, len(sequence) - ERROR_RANGE)
-
-        return sequence, golden
+        return sequence
 
 
 def read_index_file(filename: Path) -> List[SpecimenInfo]:
@@ -264,8 +242,6 @@ def main():
                         help='Maximum bases to truncate from sequence end')
     parser.add_argument('--truncation-prob', type=float, default=0.5,
                         help='Probability of truncating sequence')
-    parser.add_argument('--adapter-prob', type=float, default=0.8,
-                        help='Probability of adding adapter')
     parser.add_argument('--adapter-file', type=str,
                         help='File containing ONT adapter sequence')
     parser.add_argument('--seed', type=int, help='Random seed for reproducibility')
@@ -299,7 +275,6 @@ def main():
         homopolymer_error_rate=args.homopolymer_error_rate,
         truncation_max=args.truncation_max,
         truncation_prob=args.truncation_prob,
-        adapter_prob=args.adapter_prob,
         adapter_seq=adapter_seq
     )
 
@@ -317,7 +292,7 @@ def main():
 
         for specimen in specimens:
             for i in range(args.reads_per_specimen):
-                sequence, golden = simulator.construct_read(specimen)
+                sequence = simulator.construct_read(specimen)
                 read_id = f"{specimen.id}_read_{i}"
 
                 # Build FASTQ entry
@@ -350,5 +325,4 @@ def main():
 
 if __name__ == "__main__":
     main()
-
 
