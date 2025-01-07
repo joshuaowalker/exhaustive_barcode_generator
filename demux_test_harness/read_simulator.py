@@ -234,9 +234,9 @@ def main():
                         help='Number of reads to generate per specimen')
     parser.add_argument('--noise-length', type=int, default=100,
                         help='Length of random noise sections')
-    parser.add_argument('--error-rate', type=float, default=0.15,
+    parser.add_argument('--error-rate', type=float, default=0.10,
                         help='Base error rate for mutations')
-    parser.add_argument('--homopolymer-error-rate', type=float, default=0.25,
+    parser.add_argument('--homopolymer-error-rate', type=float, default=0.10,
                         help='Error rate for homopolymer regions')
     parser.add_argument('--truncation-max', type=int, default=20,
                         help='Maximum bases to truncate from sequence end')
