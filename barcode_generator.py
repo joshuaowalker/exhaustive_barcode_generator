@@ -22,6 +22,114 @@ from functools import partial
 
 
 @dataclass
+class DimerConfig:
+    """Configuration for self-dimer checking"""
+    min_overlap: int = 4
+    score_threshold: float = 0.35
+    continuous_weight: float = 0.7
+    total_weight: float = 0.3
+
+    def __post_init__(self):
+        if not 0 <= self.score_threshold <= 1:
+            raise ValueError("score_threshold must be between 0 and 1")
+        if not 0 <= self.continuous_weight <= 1:
+            raise ValueError("continuous_weight must be between 0 and 1")
+        if not 0 <= self.total_weight <= 1:
+            raise ValueError("total_weight must be between 0 and 1")
+        if abs(self.continuous_weight + self.total_weight - 1.0) > 1e-6:
+            raise ValueError("continuous_weight and total_weight must sum to 1")
+
+class SelfDimerChecker:
+    """Checks DNA sequences for self-dimerization potential"""
+
+    def __init__(self, config: DimerConfig):
+        self.config = config
+
+    @staticmethod
+    def _is_complementary(base1: str, base2: str) -> bool:
+        """Check if two bases are complementary"""
+        pairs = {
+            'A': 'T',
+            'T': 'A',
+            'C': 'G',
+            'G': 'C'
+        }
+        return pairs.get(base1) == base2
+
+    def _score_alignment(self, matches: list) -> float:
+        """Score an alignment based on match quality
+        Returns a score between 0 and 1, with 1 being strongest interaction"""
+        if not matches:
+            return 0.0
+
+        # Count continuous matches
+        max_continuous = 0
+        current_continuous = 0
+        total_matches = 0
+
+        for match in matches:
+            if match:
+                current_continuous += 1
+                total_matches += 1
+                max_continuous = max(max_continuous, current_continuous)
+            else:
+                current_continuous = 0
+
+        # Weight continuous matches more heavily using configured weights
+        score = (self.config.continuous_weight * (max_continuous / len(matches))) + \
+                (self.config.total_weight * (total_matches / len(matches)))
+
+        return score
+
+    def check_self_dimers(self, sequence: str) -> tuple[bool, str]:
+        """Check sequence for self-dimerization potential
+        Returns (has_dimers, alignment_str)"""
+        sequence = sequence.upper()
+        best_score = 0
+        best_alignment = ""
+
+        # Try different alignments/overlaps
+        for offset in range(-len(sequence) + self.config.min_overlap,
+                            len(sequence) - self.config.min_overlap + 1):
+            matches = []
+            alignment_str = ""
+
+            # Create alignment strings
+            top = sequence
+            bottom = sequence[::-1]  # Reverse for complementary check
+
+            if offset < 0:
+                top = " " * abs(offset) + top
+            else:
+                bottom = " " * offset + bottom
+
+            # Trim to matching lengths
+            max_len = max(len(top), len(bottom))
+            top = top.ljust(max_len)
+            bottom = bottom.ljust(max_len)
+
+            # Check complementary bases
+            for i in range(min(len(top), len(bottom))):
+                if top[i] != " " and bottom[i] != " ":
+                    is_match = SelfDimerChecker._is_complementary(top[i], bottom[i])
+                    matches.append(is_match)
+                    alignment_str += "|" if is_match else " "
+                else:
+                    alignment_str += " "
+
+            # Score this alignment
+            score = self._score_alignment(matches)
+
+            # Keep track of best alignment
+            if score > best_score:
+                best_score = score
+                best_alignment = f"5-{sequence}->\n{alignment_str}\n   <-{sequence[::-1]}-5"
+
+        has_dimers = best_score > self.config.score_threshold
+        return has_dimers, best_alignment
+
+
+@dataclass
 class WorkItem:
     """Parameters for worker processes"""
     start_idx: int
@@ -34,6 +142,9 @@ class WorkItem:
     filter_rc: bool
     current_barcodes: List[List[str]]
     exclusion_seqs: List[str]
+    dimer_checker: Optional[SelfDimerChecker] = None  # Add this line
+
+
 
 
 class ParallelBarcodeGenerator:
@@ -46,6 +157,7 @@ class ParallelBarcodeGenerator:
                  max_gc: float,
                  max_homopolymer: int,
                  filter_rc: bool = False,
+                 dimer_config: Optional[DimerConfig] = None,
                  exclusion_file: Optional[Path] = None,
                  initial_barcodes: Optional[Path] = None,  # New parameter
                  random_seqs: int = 1,
@@ -58,6 +170,8 @@ class ParallelBarcodeGenerator:
         self.max_gc = max_gc
         self.max_homopolymer = max_homopolymer
         self.filter_rc = filter_rc
+        self.dimer_config = dimer_config or DimerConfig()
+        self.dimer_checker = SelfDimerChecker(self.dimer_config)
         self.num_processes = num_processes or cpu_count()
         self.chunk_size = chunk_size
         self.bases = ['A', 'C', 'G', 'T']
@@ -188,23 +302,30 @@ class ParallelBarcodeGenerator:
 
             barcode = ParallelBarcodeGenerator.index_to_barcode(idx, work_item.length)
 
-            # Early filtering
+            # Modified condition to use dimer_checker properly
             if not (work_item.min_gc <= ParallelBarcodeGenerator.gc_cont(barcode) <= work_item.max_gc and
                     not ParallelBarcodeGenerator.has_homopolymer(barcode, work_item.max_homopolymer)):
                 continue
 
-            # Check compatibility with current set
+            # Check dimers separately if we have a checker
+            if work_item.dimer_checker:
+                sequence = "".join(barcode)
+                has_dimers, _ = work_item.dimer_checker.check_self_dimers(sequence)
+                if has_dimers:
+                    continue
+
+            # Rest of the method remains the same...
             compatible, conflict_idx = ParallelBarcodeGenerator.is_compatible(
                 barcode, local_barcodes, work_item.exclusion_seqs, work_item.min_distance, work_item.filter_rc)
 
             if compatible:
                 candidate_barcodes.append(barcode)
             elif conflict_idx >= 0:
-                # Move conflicting barcode to front of list for faster future checks
                 conflicting = local_barcodes.pop(conflict_idx)
                 local_barcodes.insert(0, conflicting)
 
         return candidate_barcodes
+
 
     @staticmethod
     def homopolymer_percentage(barcode: List[str]) -> float:
@@ -303,7 +424,6 @@ class ParallelBarcodeGenerator:
             pbar = tqdm(total=self.total_barcodes, desc="Testing sequences")
 
             while sequences_checked < self.total_barcodes and len(accepted_barcodes) < target_size:
-                # Create work items
                 work_items = []
                 for _ in range(self.num_processes):
                     if next_index >= self.total_barcodes:
@@ -319,7 +439,8 @@ class ParallelBarcodeGenerator:
                         max_homopolymer=self.max_homopolymer,
                         filter_rc=self.filter_rc,
                         current_barcodes=accepted_barcodes.copy(),
-                        exclusion_seqs=self.exclusion_seqs
+                        exclusion_seqs=self.exclusion_seqs,
+                        dimer_checker=self.dimer_checker  # Add this line
                     ))
                     next_index += self.chunk_size
 
@@ -479,6 +600,31 @@ def parse_arguments() -> argparse.Namespace:
         help='File containing pre-specified barcodes (one per line)'
     )
 
+    parser.add_argument(
+        '--dimer-min-overlap',
+        type=int,
+        default=4,
+        help='Minimum overlap length to consider for self-dimers (default: 4)'
+    )
+    parser.add_argument(
+        '--dimer-score-threshold',
+        type=float,
+        default=0.35,
+        help='Score threshold above which to consider a sequence as having self-dimers (0-1, default: 0.35)'
+    )
+    parser.add_argument(
+        '--dimer-continuous-weight',
+        type=float,
+        default=0.7,
+        help='Weight given to continuous matches in dimer scoring (0-1, default: 0.7)'
+    )
+    parser.add_argument(
+        '--dimer-total-weight',
+        type=float,
+        default=0.3,
+        help='Weight given to total matches in dimer scoring (0-1, default: 0.3)'
+    )
+
     args = parser.parse_args()
 
     # Validate arguments
@@ -556,6 +702,14 @@ def main() -> None:
 
     start_time = time.process_time()
 
+    # Create dimer configuration
+    dimer_config = DimerConfig(
+        min_overlap=args.dimer_min_overlap,
+        score_threshold=args.dimer_score_threshold,
+        continuous_weight=args.dimer_continuous_weight,
+        total_weight=args.dimer_total_weight
+    )
+
     # Initialize generator
     generator = ParallelBarcodeGenerator(
         length=args.length,
@@ -564,6 +718,7 @@ def main() -> None:
         max_gc=args.max_gc,
         max_homopolymer=args.max_homopolymer,
         filter_rc=args.filter_rc,
+        dimer_config=dimer_config,
         exclusion_file=args.exclusion_file,
         initial_barcodes=args.initial_barcodes,  # Add this line
         random_seqs=args.random_seqs,
@@ -618,5 +773,3 @@ def main() -> None:
 
 if __name__ == '__main__':
     main()
-
-
