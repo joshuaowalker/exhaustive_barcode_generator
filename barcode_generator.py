@@ -715,7 +715,6 @@ def write_output(
         output_path: Path,
         length: int,
         min_distance: int,
-        runtime: float,
         sequences_checked: int,
         sort_by: Optional[str] = None
 ) -> None:
@@ -744,7 +743,6 @@ def write_output(
         f.write(f'- Barcode length: {length}\n')
         f.write(f'- Minimum Levenshtein distance: {min_distance}\n')
         f.write(f'- Sequences checked: {sequences_checked:,}\n')
-        f.write(f'- Runtime: {runtime:.2f} seconds\n\n')
         f.write(f'Found {len(barcodes)} barcodes:\n\n')
 
         # Write header
@@ -758,8 +756,6 @@ def write_output(
 def main() -> None:
     args = parse_arguments()
     setup_logging(args.debug)
-
-    start_time = time.process_time()
 
     # Create dimer configuration
     dimer_config = DimerConfig(
@@ -792,8 +788,6 @@ def main() -> None:
         logging.info("\nInterrupted by user. Saving results...")
         barcodes, sequences_checked = [], 0
 
-    end_time = time.process_time()
-    runtime = end_time - start_time
 
     # Write output with sorting
     write_output(
@@ -801,7 +795,6 @@ def main() -> None:
         args.output,
         args.length,
         args.min_distance,
-        runtime,
         sequences_checked,
         args.sort
     )
@@ -822,7 +815,6 @@ def main() -> None:
     print("\nRESULTS\n")
     print(f"Sequences checked: {sequences_checked:,}")
     print(f"Valid barcodes found: {len(barcodes)}")
-    print(f"Runtime: {runtime:.2f} seconds")
     print("\nGenerated barcodes with metrics:")
     print("Sequence\tGC Content\tHomopolymer %")
     for barcode_str, gc, homo_pct in barcode_data:
