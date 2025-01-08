@@ -31,6 +31,7 @@ class WorkItem:
     min_gc: float
     max_gc: float
     max_homopolymer: int
+    filter_rc: bool
     current_barcodes: List[List[str]]
     exclusion_seqs: List[str]
 
@@ -44,15 +45,19 @@ class ParallelBarcodeGenerator:
                  min_gc: float,
                  max_gc: float,
                  max_homopolymer: int,
+                 filter_rc: bool = False,
                  exclusion_file: Optional[Path] = None,
+                 initial_barcodes: Optional[Path] = None,  # New parameter
                  random_seqs: int = 1,
                  num_processes: Optional[int] = None,
                  chunk_size: int = 10000):
+
         self.length = length
         self.min_distance = min_distance
         self.min_gc = min_gc
         self.max_gc = max_gc
         self.max_homopolymer = max_homopolymer
+        self.filter_rc = filter_rc
         self.num_processes = num_processes or cpu_count()
         self.chunk_size = chunk_size
         self.bases = ['A', 'C', 'G', 'T']
@@ -64,6 +69,49 @@ class ParallelBarcodeGenerator:
 
         logging.info(f"Using {self.num_processes} processes to check {self.total_barcodes:,} sequences")
         logging.info(f"Using chunk size of {self.chunk_size:,} sequences per work item")
+
+        # Load initial barcodes if provided
+        self.initial_barcodes = []
+        if initial_barcodes:
+            self.initial_barcodes = load_initial_barcodes(initial_barcodes, length)
+            logging.info(f"Loaded {len(self.initial_barcodes)} initial barcodes")
+
+            # Validate initial barcodes against constraints
+            valid_barcodes = []
+            for barcode in self.initial_barcodes:
+                barcode_str = ''.join(barcode)
+                gc = self.gc_cont(barcode)
+                has_issues = False
+
+                if not (min_gc <= gc <= max_gc):
+                    logging.warning(f"Initial barcode {barcode_str} has invalid GC content: {gc:.2%}")
+                    has_issues = True
+
+                if self.has_homopolymer(barcode, max_homopolymer):
+                    logging.warning(f"Initial barcode {barcode_str} has homopolymer longer than {max_homopolymer}")
+                    has_issues = True
+
+                # Check distance with previously validated barcodes
+                is_compatible = True
+                for valid_barcode in valid_barcodes:
+                    if not self.is_compatible(barcode, [valid_barcode],
+                                              self.exclusion_seqs, min_distance, filter_rc)[0]:
+                        logging.warning(
+                            f"Initial barcode {barcode_str} violates minimum distance requirement with {''.join(valid_barcode)}")
+                        has_issues = True
+                        is_compatible = False
+                        break
+
+                if not has_issues and is_compatible:
+                    valid_barcodes.append(barcode)
+                else:
+                    logging.warning(f"Skipping initial barcode {barcode_str} due to constraint violations")
+
+            if len(valid_barcodes) < len(self.initial_barcodes):
+                logging.warning(
+                    f"Only {len(valid_barcodes)} of {len(self.initial_barcodes)} initial barcodes met all constraints")
+
+            self.initial_barcodes = valid_barcodes
 
     @staticmethod
     def index_to_barcode(idx: int, length: int) -> List[str]:
@@ -98,7 +146,8 @@ class ParallelBarcodeGenerator:
     def is_compatible(new_barcode: List[str],
                       accepted_barcodes: List[List[str]],
                       exclusion_seqs: List[str],
-                      min_distance: int) -> Tuple[bool, int]:
+                      min_distance: int,
+                      filter_rc: bool) -> Tuple[bool, int]:
         """
         Check if a new barcode meets the distance requirement with all accepted barcodes
         Returns (is_compatible, index_of_conflict) where index_of_conflict is -1 if compatible
@@ -111,7 +160,7 @@ class ParallelBarcodeGenerator:
             existing_str = ''.join(existing)
             if edlib.align(new_str, existing_str, task='distance')['editDistance'] < min_distance:
                 return False, i
-            elif edlib.align(new_str_rc, existing_str, task='distance')['editDistance'] < min_distance:
+            elif filter_rc and edlib.align(new_str_rc, existing_str, task='distance')['editDistance'] < min_distance:
                 return False, i
 
         # Check against exclusion sequences
@@ -146,7 +195,7 @@ class ParallelBarcodeGenerator:
 
             # Check compatibility with current set
             compatible, conflict_idx = ParallelBarcodeGenerator.is_compatible(
-                barcode, local_barcodes, work_item.exclusion_seqs, work_item.min_distance)
+                barcode, local_barcodes, work_item.exclusion_seqs, work_item.min_distance, work_item.filter_rc)
 
             if compatible:
                 candidate_barcodes.append(barcode)
@@ -238,9 +287,17 @@ class ParallelBarcodeGenerator:
 
     def generate_barcodes(self, target_size: int) -> Tuple[List[List[str]], int]:
         """Generate barcodes using producer/consumer pattern"""
-        accepted_barcodes = []
+        # Start with initial barcodes if provided
+        accepted_barcodes = self.initial_barcodes.copy()
         sequences_checked = 0
         next_index = 0
+
+        # Adjust target size to account for initial barcodes
+        remaining_target = max(0, target_size - len(accepted_barcodes))
+
+        if len(accepted_barcodes) >= target_size:
+            logging.info(f"Initial barcode set already meets target size ({len(accepted_barcodes)} >= {target_size})")
+            return accepted_barcodes, sequences_checked
 
         with Pool(processes=self.num_processes) as pool:
             pbar = tqdm(total=self.total_barcodes, desc="Testing sequences")
@@ -260,6 +317,7 @@ class ParallelBarcodeGenerator:
                         min_gc=self.min_gc,
                         max_gc=self.max_gc,
                         max_homopolymer=self.max_homopolymer,
+                        filter_rc=self.filter_rc,
                         current_barcodes=accepted_barcodes.copy(),
                         exclusion_seqs=self.exclusion_seqs
                     ))
@@ -275,7 +333,7 @@ class ParallelBarcodeGenerator:
                         if len(accepted_barcodes) >= target_size:
                             break
                         compatible, _ = self.is_compatible(barcode, accepted_barcodes, self.exclusion_seqs,
-                                                           self.min_distance)
+                                                           self.min_distance, self.filter_rc)
                         if compatible:
                             accepted_barcodes.append(barcode)
 
@@ -290,6 +348,32 @@ class ParallelBarcodeGenerator:
             pbar.close()
 
         return accepted_barcodes, sequences_checked
+
+def load_initial_barcodes(file_path: Path, length: int) -> List[List[str]]:
+    """Load pre-specified barcodes from file and validate them"""
+    barcodes = []
+
+    with open(file_path) as f:
+        for line_num, line in enumerate(f, 1):
+            # Skip empty lines and comments
+            line = line.strip()
+            if not line or line.startswith('#'):
+                continue
+
+            # Extract barcode sequence (ignore any additional fields)
+            barcode = line.split()[0].upper()
+
+            # Validate barcode
+            if len(barcode) != length:
+                raise ValueError(f"Barcode on line {line_num} has incorrect length: {barcode}")
+            if not set(barcode).issubset({'A', 'C', 'G', 'T'}):
+                raise ValueError(f"Barcode on line {line_num} contains invalid characters: {barcode}")
+
+            # Convert to list format
+            barcodes.append(list(barcode))
+
+    return barcodes
+
 
 
 def setup_logging(debug: bool = False) -> None:
@@ -384,6 +468,16 @@ def parse_arguments() -> argparse.Namespace:
         action='store_true',
         help='Enable debug logging'
     )
+    parser.add_argument(
+        '--filter-rc',
+        action='store_true',
+        help='Filter barcodes with reverse complement conflicts'
+    )
+    parser.add_argument(
+        '--initial-barcodes',
+        type=Path,
+        help='File containing pre-specified barcodes (one per line)'
+    )
 
     args = parser.parse_args()
 
@@ -456,9 +550,7 @@ def write_output(
             f.write(f'{barcode_str}\t{gc:.2%}\t{homo_pct:.2%}\n')
 
 
-
 def main() -> None:
-    """Main function"""
     args = parse_arguments()
     setup_logging(args.debug)
 
@@ -471,7 +563,9 @@ def main() -> None:
         min_gc=args.min_gc,
         max_gc=args.max_gc,
         max_homopolymer=args.max_homopolymer,
+        filter_rc=args.filter_rc,
         exclusion_file=args.exclusion_file,
+        initial_barcodes=args.initial_barcodes,  # Add this line
         random_seqs=args.random_seqs,
         num_processes=args.processes,
         chunk_size=args.chunk_size
