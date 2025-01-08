@@ -296,15 +296,20 @@ class ParallelBarcodeGenerator:
         candidate_barcodes = []
         local_barcodes = work_item.current_barcodes.copy()
 
-        for idx in range(work_item.start_idx, work_item.start_idx + work_item.chunk_size):
-            if idx >= 4 ** work_item.length:
-                break
-
+        idx = work_item.start_idx
+        while idx < min(work_item.start_idx + work_item.chunk_size, 4 ** work_item.length):
             barcode = ParallelBarcodeGenerator.index_to_barcode(idx, work_item.length)
 
-            # Modified condition to use dimer_checker properly
-            if not (work_item.min_gc <= ParallelBarcodeGenerator.gc_cont(barcode) <= work_item.max_gc and
-                    not ParallelBarcodeGenerator.has_homopolymer(barcode, work_item.max_homopolymer)):
+            # Check GC content first as it's fast
+            if not work_item.min_gc <= ParallelBarcodeGenerator.gc_cont(barcode) <= work_item.max_gc:
+                idx += 1
+                continue
+
+            # Check homopolymers with skip distance
+            has_homo, skip = ParallelBarcodeGenerator.has_homopolymer_with_skip(
+                barcode, work_item.max_homopolymer)
+            if has_homo:
+                idx += max(1, skip)  # Always advance at least 1
                 continue
 
             # Check dimers separately if we have a checker
@@ -312,20 +317,74 @@ class ParallelBarcodeGenerator:
                 sequence = "".join(barcode)
                 has_dimers, _ = work_item.dimer_checker.check_self_dimers(sequence)
                 if has_dimers:
+                    idx += 1
                     continue
 
-            # Rest of the method remains the same...
+            # Check compatibility with current set
             compatible, conflict_idx = ParallelBarcodeGenerator.is_compatible(
-                barcode, local_barcodes, work_item.exclusion_seqs, work_item.min_distance, work_item.filter_rc)
+                barcode, local_barcodes, work_item.exclusion_seqs,
+                work_item.min_distance, work_item.filter_rc)
 
             if compatible:
                 candidate_barcodes.append(barcode)
             elif conflict_idx >= 0:
+                # Move conflicting barcode to front of list for faster future checks
                 conflicting = local_barcodes.pop(conflict_idx)
                 local_barcodes.insert(0, conflicting)
 
+            idx += 1
+
         return candidate_barcodes
 
+    @staticmethod
+    def calculate_skip_distance(barcode: List[str], position: int, max_homopolymer: int) -> int:
+        """
+        Calculate how many sequences to skip based on a homopolymer violation.
+        Returns the number of sequences to skip to clear the homopolymer.
+
+        Args:
+            barcode: The current barcode sequence
+            position: Position where homopolymer violation was detected
+            max_homopolymer: Maximum allowed homopolymer length
+        """
+        # Count the homopolymer length up to this position
+        homo_len = 1
+        base = barcode[position]
+        for i in range(position - 1, -1, -1):
+            if barcode[i] != base:
+                break
+            homo_len += 1
+
+        # Calculate how many positions we need to skip to clear this homopolymer
+        excess = homo_len - max_homopolymer
+        if excess <= 0:
+            return 0
+
+        # Calculate skip distance based on position
+        # Each position represents 4^n sequences where n is the remaining length
+        remaining_length = len(barcode) - position - 1
+        skip_distance = 4 ** remaining_length
+
+        return skip_distance
+
+    @staticmethod
+    def has_homopolymer_with_skip(barcode: List[str], max_homopolymer_length: int) -> Tuple[bool, int]:
+        """
+        Modified homopolymer check that returns both the result and how many sequences to skip.
+        Returns (has_homopolymer, skip_distance)
+        """
+        count = 1
+        for i in range(1, len(barcode)):
+            if barcode[i] == barcode[i - 1]:
+                count += 1
+                if count > max_homopolymer_length:
+                    # Calculate skip distance when violation is found
+                    skip = ParallelBarcodeGenerator.calculate_skip_distance(
+                        barcode, i, max_homopolymer_length)
+                    return True, skip
+            else:
+                count = 1
+        return False, 0
 
     @staticmethod
     def homopolymer_percentage(barcode: List[str]) -> float:
@@ -773,3 +832,5 @@ def main() -> None:
 
 if __name__ == '__main__':
     main()
+
+
