@@ -312,20 +312,24 @@ class ParallelBarcodeGenerator:
                 idx += max(1, skip)  # Always advance at least 1
                 continue
 
-            # Check dimers separately if we have a checker
-            if work_item.dimer_checker:
-                sequence = "".join(barcode)
-                has_dimers, _ = work_item.dimer_checker.check_self_dimers(sequence)
-                if has_dimers:
-                    idx += 1
-                    continue
-
             # Check compatibility with current set
             compatible, conflict_idx = ParallelBarcodeGenerator.is_compatible(
                 barcode, local_barcodes, work_item.exclusion_seqs,
                 work_item.min_distance, work_item.filter_rc)
 
             if compatible:
+                # Post checks - these are potentially slower
+                sequence = "".join(barcode)
+                if work_item.dimer_checker:
+                    has_dimers, _ = work_item.dimer_checker.check_self_dimers(sequence)
+                    if has_dimers:
+                        idx += 1
+                        continue
+
+                if ParallelBarcodeGenerator.has_problematic_repeats(sequence):
+                    idx += 1
+                    continue
+
                 candidate_barcodes.append(barcode)
             elif conflict_idx >= 0:
                 # Move conflicting barcode to front of list for faster future checks
@@ -464,6 +468,56 @@ class ParallelBarcodeGenerator:
 
         logging.info(f"Loaded {len(exclusion_seqs)} exclusion sequences")
         return exclusion_seqs
+
+    @staticmethod
+    def detect_adjacent_repeats(sequence: str, min_repeat_len: int = 2, max_repeat_len: int = 4) -> List[
+        Tuple[str, int]]:
+        """
+        Find adjacent repeating patterns of length min_repeat_len to max_repeat_len.
+        Returns list of (pattern, count) tuples for found repeats.
+
+        Example:
+            "TCTGTGTCTG" with min_repeat_len=2, max_repeat_len=3 would find:
+            [("TG", 2)] for the adjacent TGTG
+        """
+        repeats = []
+
+        # Check each possible repeat length
+        for length in range(min_repeat_len, max_repeat_len + 1):
+            i = 0
+            while i <= len(sequence) - length:
+                pattern = sequence[i:i + length]
+                # Count consecutive occurrences
+                count = 1
+                pos = i + length
+                while pos <= len(sequence) - length and sequence[pos:pos + length] == pattern:
+                    count += 1
+                    pos += length
+
+                if count > 1:
+                    repeats.append((pattern, count))
+                    i = pos  # Skip past this repeat
+                else:
+                    i += 1
+
+        return repeats
+
+    @staticmethod
+    def has_problematic_repeats(sequence: str,
+                                min_repeat_len: int = 2,
+                                max_repeat_len: int = 4,
+                                max_repeat_count: int = 2) -> bool:
+        """
+        Check if sequence has problematic adjacent repeats.
+        Returns True if problematic repeats found, False otherwise.
+        """
+        repeats = ParallelBarcodeGenerator.detect_adjacent_repeats(sequence, min_repeat_len, max_repeat_len)
+
+        for pattern, count in repeats:
+            if count >= max_repeat_count:
+                return True
+
+        return False
 
     def generate_barcodes(self, target_size: int) -> Tuple[List[List[str]], int]:
         """Generate barcodes using producer/consumer pattern"""
